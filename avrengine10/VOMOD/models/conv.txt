@@ -1,0 +1,17 @@
+SINGLE_INPUT_SIZE = 388      
+HIDDEN_SIZE = 256              # Размер одного слоя
+NUM_LAYERS = 6                  # 7 слоев Conv1D
+SINGLE_OUTPUT_SIZE = 259        # 64 Gain + 64 Struct + 64 Coh + 64 Phase + 1 сдвиг + 1 ширина + 1 режим
+MODEL_PATH = "conv_taka.vonn"
+
+FRAMES_PER_PACK = 2 
+INPUT_SIZE = SINGLE_INPUT_SIZE * FRAMES_PER_PACK
+OUTPUT_SIZE = SINGLE_OUTPUT_SIZE * FRAMES_PER_PACK
+
+WINDOW_SIZE = 4096
+HOP_SIZE = 1024
+CUTOFF_MIN = 10000        
+CUTOFF_MAX = 15000       
+TARGET_MAX_FREQ = 20000 
+EPOCHS = 800          
+BATCH_SIZE = 64

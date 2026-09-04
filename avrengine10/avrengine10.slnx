@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="avrengine10.vcxproj" Id="388065a3-3533-4b00-8950-0fef5c65c5ae" />
+</Solution>

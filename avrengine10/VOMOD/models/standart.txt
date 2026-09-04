@@ -1,0 +1,16 @@
+SINGLE_INPUT_SIZE = 388      
+HIDDEN_SIZE = 256              # Размер одного слоя
+NUM_LAYERS = 5                  # Кол-во слоёв
+SINGLE_OUTPUT_SIZE = 259        # 64 Gain + 64 Struct + 64 Coh + 64 Phase + 1 сдвиг + 1 ширина + 1 режим
+MODEL_PATH = "standart_taka.vonn"
+
+# Заменяем FRAMES_PER_PACK на SEQ_LEN
+SEQ_LEN = 16 
+
+WINDOW_SIZE = 4096
+HOP_SIZE = 1024
+CUTOFF_MIN = 8000        
+CUTOFF_MAX = 10000       
+TARGET_MAX_FREQ = 16000 
+EPOCHS = 800          
+BATCH_SIZE = 64
