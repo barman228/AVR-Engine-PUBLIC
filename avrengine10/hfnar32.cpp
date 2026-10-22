@@ -12,7 +12,7 @@
 #include <vector>
 
 #ifndef M_PI
-#define M_PI 3.14159265358979323846 // ты
+#define M_PI 3.14159265358979323846
 #endif
 
 namespace HFNAR32 {
@@ -85,7 +85,7 @@ namespace HFNAR32 {
 
             unsigned int current_channel_threads = std::min(actual_threads, static_cast<unsigned int>(total_packs));
             if (current_channel_threads == 0) current_channel_threads = 1;
-			// Распределяем пакеты между потоками
+
             size_t packs_per_thread = (total_packs + current_channel_threads - 1) / current_channel_threads;
 
             std::vector<std::future<void>> futures;
@@ -101,20 +101,17 @@ namespace HFNAR32 {
                     double prev_gain = 1.0;
                     std::vector<double> smoothed_hf_envelope(nn_model->single_output_size, 0.0);
                     bool is_first_frame = true;
+                    std::vector<std::vector<double>> phase_history;
 
                     for (size_t pack_idx = start_pack; pack_idx < end_pack; ++pack_idx) {
                         size_t f = pack_idx * pack_size;
                         uint32_t current_pack_count = std::min(static_cast<uint32_t>(pack_size), static_cast<uint32_t>(num_frames - f));
 
                         std::vector<std::vector<std::complex<double>>> pack_fft(current_pack_count, std::vector<std::complex<double>>(WINDOW_SIZE, 0.0));
-
-                        // ИСПРАВЛЕНИЕ: Выделяем память для [Channels, SEQ_LEN] вместо плоского пуша через .insert()
                         std::vector<double> combined_features(nn_model->single_input_size * pack_size, 0.0);
-
                         std::vector<double> pack_sum_mag(current_pack_count, 0.0);
                         std::vector<double> last_valid_features;
 
-                        // 1: Собираем FFT и фичи для всех кадров
                         for (uint32_t p = 0; p < current_pack_count; ++p) {
                             size_t frame_idx = f + p;
                             size_t offset = frame_idx * HOP_SIZE;
@@ -128,16 +125,16 @@ namespace HFNAR32 {
                                 pack_sum_mag[p] += std::abs(pack_fft[p][k]);
                             }
 
-                            auto single_features = VOMOD30::extract_features(pack_fft[p], WINDOW_SIZE, sampleRate, current_cutoff, *nn_model);
+                            auto single_features = VOMOD30::extract_features(
+                                pack_fft[p], WINDOW_SIZE, sampleRate, current_cutoff, *nn_model, phase_history
+                            );
 
-                            // [C, L]
                             for (size_t c = 0; c < nn_model->single_input_size; ++c) {
                                 combined_features[c * pack_size + p] = single_features[c];
                             }
                             last_valid_features = single_features;
                         }
 
-                        // Паддинг хвоста, если пакет неполный
                         if (current_pack_count < pack_size) {
                             for (uint32_t pad = current_pack_count; pad < pack_size; ++pad) {
                                 for (size_t c = 0; c < nn_model->single_input_size; ++c) {
@@ -146,15 +143,13 @@ namespace HFNAR32 {
                             }
                         }
 
-                        // 2. проход нейросети 
-                        // массив [Channels, SEQ_LEN]
                         auto pack_envelope = VOMOD30::predict_hf_envelope(combined_features, *nn_model);
 
-                        // 3. Применяем синтез
                         for (uint32_t p = 0; p < current_pack_count; ++p) {
-                            size_t frame_idx = f + p;
+                            size_t frame_idx = f + p; // Глобальный индекс кадра
                             size_t offset = frame_idx * HOP_SIZE;
 
+                            // Извлекаем огибающую конкретно для кадра p (длиной 513) из плоского вектора pack_envelope
                             std::vector<double> hf_envelope(nn_model->single_output_size, 0.0);
                             for (size_t c = 0; c < nn_model->single_output_size; ++c) {
                                 hf_envelope[c] = pack_envelope[c * pack_size + p];
@@ -166,15 +161,26 @@ namespace HFNAR32 {
                                     is_first_frame = false;
                                 }
                                 else {
+                                    // Легкая межкадровая фильтрация для устранения дребезга
                                     for (size_t i = 0; i < hf_envelope.size(); ++i) {
-                                        smoothed_hf_envelope[i] = (hf_envelope[i] * 0.6) + (smoothed_hf_envelope[i] * 0.4);
+                                        smoothed_hf_envelope[i] = (hf_envelope[i] * 0.7) + (smoothed_hf_envelope[i] * 0.3);
                                     }
                                 }
 
-                                VOMOD30::apply_patch_synthesis(pack_fft[p], WINDOW_SIZE, sampleRate, current_cutoff, smoothed_hf_envelope, *nn_model);
+                                // ИСПРАВЛЕНИЕ: передаем frame_idx (глобальный индекс) вместо p
+                                VOMOD30::apply_patch_synthesis(
+                                    pack_fft[p],
+                                    WINDOW_SIZE,
+                                    sampleRate,
+                                    current_cutoff,
+                                    smoothed_hf_envelope,
+                                    *nn_model,
+                                    0.5,
+                                    frame_idx
+                                );
+
                                 apply_smooth_equalizer(pack_fft[p], WINDOW_SIZE, sampleRate, current_cutoff, sampleRate / 2, { 3.0, 4.0, 3.0, 2.0, 0.0 });
 
-								// Adaptive Temporal Envelope Sharping (TES) для улучшения динамики высоких частот
                                 if (use_tes) {
                                     std::vector<std::complex<double>> fft_lf = pack_fft[p];
                                     std::vector<std::complex<double>> fft_hf(WINDOW_SIZE, 0.0);
@@ -196,7 +202,6 @@ namespace HFNAR32 {
 
                                     size_t sub_blocks = 8;
                                     size_t block_size = WINDOW_SIZE / sub_blocks;
-									// Вычисляем энергию в каждом под-блоке для LF и HF
                                     double total_lf_e = 1e-9;
                                     double total_hf_e = 1e-9;
                                     std::vector<double> lf_e(sub_blocks, 0.0);
@@ -212,18 +217,18 @@ namespace HFNAR32 {
                                         total_lf_e += lf_e[b];
                                         total_hf_e += hf_e[b];
                                     }
-									// Сглаживание коэффициентов усиления для предотвращения резких скачков
-                                    double smoothing_factor = 0.5;
+
+                                    double smoothing_factor = 0.85;
                                     std::vector<double> smoothed_gains(sub_blocks);
                                     double running_gain = prev_gain;
 
                                     for (size_t b = 0; b < sub_blocks; ++b) {
                                         double target_gain = std::sqrt((total_hf_e * (lf_e[b] / total_lf_e) + 1e-9) / (hf_e[b] + 1e-9));
-                                        target_gain = std::clamp(target_gain, 0.1, 3.0);
+                                        target_gain = std::clamp(target_gain, 0.35, 2.0);
                                         smoothed_gains[b] = running_gain * (1.0 - smoothing_factor) + target_gain * smoothing_factor;
                                         running_gain = smoothed_gains[b];
                                     }
-									// Применяем сглаженные коэффициенты усиления к HF сигналу и объединяем с LF
+
                                     for (size_t b = 0; b < sub_blocks; ++b) {
                                         double g_start = (b == 0) ? prev_gain : smoothed_gains[b - 1];
                                         double g_end = smoothed_gains[b];
@@ -238,14 +243,14 @@ namespace HFNAR32 {
                                     }
                                     prev_gain = running_gain;
                                 }
-								else { // Если TES не используется, просто восстанавливаем симметрию и выполняем обратное преобразование Фурье
+                                else {
                                     for (size_t k = 1; k < WINDOW_SIZE / 2; ++k) {
                                         pack_fft[p][WINDOW_SIZE - k] = std::conj(pack_fft[p][k]);
                                     }
                                     pack_fft[p][WINDOW_SIZE / 2] = std::complex<double>(pack_fft[p][WINDOW_SIZE / 2].real(), 0.0);
                                     ifft(pack_fft[p]);
                                 }
-							}
+                            }
                             else {
                                 for (size_t k = 1; k < WINDOW_SIZE / 2; ++k) {
                                     pack_fft[p][WINDOW_SIZE - k] = std::conj(pack_fft[p][k]);
@@ -254,7 +259,6 @@ namespace HFNAR32 {
                                 ifft(pack_fft[p]);
                             }
 
-                            // 4: Подготовка локального результата перед блокировкой
                             std::vector<double> temp_out_real(WINDOW_SIZE);
                             std::vector<double> temp_window_sum(WINDOW_SIZE);
 
@@ -263,7 +267,6 @@ namespace HFNAR32 {
                                 temp_window_sum[j] = window[j] * window[j];
                             }
 
-                            // Безопасный перенос во временной массив OLA
                             {
                                 std::lock_guard<std::mutex> lock(ola_mutex);
                                 for (size_t j = 0; j < WINDOW_SIZE; ++j) {
@@ -279,13 +282,11 @@ namespace HFNAR32 {
                     }));
             }
 
-            // Дожидаемся завершения обработки всех сегментов текущего канала
             for (auto& fut : futures) {
                 fut.get();
             }
         }
 
-        // ФИНАЛЬНЫЙ СИНТЕЗ
         for (size_t i = 0; i < totalPCMFrameCount * channels; ++i) {
             float sample = 0.0f;
             if (window_sum[i] > 1e-6) {

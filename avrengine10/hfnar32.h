@@ -6,8 +6,8 @@
 
 namespace HFNAR32 {
 
-    constexpr size_t WINDOW_SIZE = 2048;
-    constexpr size_t HOP_SIZE = 512;
+    constexpr size_t WINDOW_SIZE = 4096;
+    constexpr size_t HOP_SIZE = 1024;
 
     bool generate_voice_model32(
         const float* pRefData,

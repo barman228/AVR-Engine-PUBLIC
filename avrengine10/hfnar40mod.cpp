@@ -1,5 +1,5 @@
 #include "hfnar40mod.h"
-#include "fft.h" // Используем общую функцию FFT проекта
+#include "fft.h"
 #include <cmath>
 #include <algorithm>
 #include <complex>

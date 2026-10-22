@@ -26,6 +26,7 @@ HFNAR Created specially for LMG Archive project by GSN 2023-2026.
 #include "hfnar40p.h"
 #include "hfnar40a.h"
 #include "hfnar40.h"
+#include "mvmod10.h"
 #include "thread"
 //#include "mvmod10_nn.h"
 
@@ -40,9 +41,41 @@ int main(int argc, char* argv[]) {
 	bool TES = false; // Adaptive Temporal Envelope Sharping (TES) флаг для HFNAR32
     bool force_mono_flag = false;
     std::string model_filename = "standart_taka.vonn"; // Дефолтная непараметрическая модель .mv32 (vomod 2.0)
-	std::string model_filename_mv1x = "MVMOD/video_enhancer"; // Дефолтная видео модель .mv1x (vomod 2.4)
-	std::string model_filename_vnn4 = "vomod40_model.vnn4"; // Дефолтная модель VNN4 для HFNAR40 (vomod 4.0)
+	std::string model_filename_mv1x = "MVMOD/madsr_2x.mvnn"; // Дефолтная видео модель .mv1x (mvmod 1.0,vomod 2.4)
+	std::string model_filename_vnn4 = "empty"; // Дефолтная модель VNN4 для HFNAR40 (vomod 4.0)
 	int w = 0; int h = 0; int num_threads = 0; // Количество потоков по умолчанию
+
+    // MVMOD 1.0
+    // Глобальные настройки видео-режима.
+    struct MovieModeSettings {
+        float strength = 1.0f;   // 1.0 = как обучено, 0.0 = билинейка, 1.4 = переострее
+        int   threads = 0;      // 0 = auto
+        bool  stateful = true;   // переносить temporal state между кадрами
+        float scene_cut_thresh = 0.25f;
+        bool  verbose = true;
+        // Ручной override частоты кадров. 0 = авто.
+        double fps_override = 0.0;
+
+        // --- Temporal denoise ---
+        // 0 = выключен. 0.3..0.8 — рабочий диапазон.
+        float denoise = 0.1f;
+        float denoise_thresh = 0.02f;  // порог «шум vs движение»
+
+        // --- Pre-sharp: мелкая текстура, не трогает сильные грани ---
+        // 0 = выключен. 0.10..0.30 — рабочий диапазон.
+        float sharp_tex = 0.1f;
+
+        // --- Post-sharp: структура с защитой от halo ---
+        // 0 = выключен. 0.15..0.40 — рабочий диапазон.
+        float sharp = 0.1f;
+        float sharp_halo_guard = 0.06f;  // больше = сильнее защита от ореолов
+
+        // --- DeHalo (первый в post-цепочке) ---
+        // 0 = выключен. 0.3..0.7 — рабочий диапазон.
+        float dehalo = 0.0f;
+        float dehalo_dark_bias = 0.3f;
+    };
+    static MovieModeSettings g_movie;
 
     // (флаги можно писать в любом порядке)
     for (int i = 1; i < argc; ++i) {
@@ -51,8 +84,8 @@ int main(int argc, char* argv[]) {
         if (arg == "-v") {
             if (i + 1 < argc) {
                 version = std::atoi(argv[++i]);
-                if (version != 10 && version != 16 && version != 20 && version != 21 && version != 30 && version != 32 && version != 34 && version != 40 && version != 41 && version != 42) {
-                    std::cerr << "Error: version not found, use 10,16,20,21,30,32.\n";
+                if (version != 10 && version != 16 && version != 20 && version != 21 && version != 30 && version != 32 && version != 33 && version != 34 && version != 40 && version != 41 && version != 42) {
+                    std::cerr << "Error: version not found, use 10,16,20,21,30,32,33.\n";
                     return 1;
                 }
             }
@@ -133,10 +166,10 @@ int main(int argc, char* argv[]) {
 				return 1;
 			}
 			if (version == 16) {
-				model_filename_mv1x = model_filename; // Для версии 1.6 используем другой путь к модели
+				model_filename_mv1x = model_filename; // Для версии 1.6 другой путь модели
 			}
 			if (version == 40) {
-				model_filename_vnn4 = model_filename; // Для версии 4.0 используем другой путь к модели
+				model_filename_vnn4 = model_filename;
 			}
 		}
         else if (arg == "-mono") {
@@ -147,6 +180,120 @@ int main(int argc, char* argv[]) {
         }
         else if (arg == "-h") {
             h = std::stoi(argv[++i]);
+        }
+        else if (arg == "-str") {
+            if (i + 1 < argc) {
+                g_movie.strength = std::stof(argv[++i]);
+                if (g_movie.strength < 0.0f || g_movie.strength > 2.5f) {
+                    std::cerr << "Warning: strength " << g_movie.strength
+                        << " вне разумного диапазона [0.0, 2.5]\n";
+                }
+            }
+            else {
+                std::cerr << "Error: -str must be followed by a float (e.g. -str 1.2).\n";
+                return 1;
+            }
+        }
+        else if (arg == "-denoise") {
+            if (i + 1 < argc) {
+                float v = std::stof(argv[++i]);
+                g_movie.denoise = (v > 0.f) ? v : 0.f;
+                if (g_movie.denoise > 1.0f) {
+                    std::cerr << "Warning: -denoise " << g_movie.denoise
+                        << " > 1.0, clamped to 1.0\n";
+                    g_movie.denoise = 1.0f;
+                }
+            }
+            else {
+                std::cerr << "Error: -denoise must be followed by a value (0 = off).\n";
+                return 1;
+            }
+            }
+        else if (arg == "-denoise-thresh") {
+            if (i + 1 < argc) {
+                    g_movie.denoise_thresh = std::stof(argv[++i]);
+            }
+            else {
+                std::cerr << "Error: -denoise-thresh must be followed by a value.\n";
+                return 1;
+            }
+        }
+        else if (arg == "-sharp-tex" || arg == "-pre-sharp") {
+            if (i + 1 < argc) {
+                float v = std::stof(argv[++i]);
+                g_movie.sharp_tex = (v > 0.f) ? v : 0.f;
+                if (g_movie.sharp_tex > 1.0f) {
+                    std::cerr << "Warning: -sharp-tex " << g_movie.sharp_tex
+                        << " > 1.0, clamped to 1.0\n";
+                    g_movie.sharp_tex = 1.0f;
+                }
+            }
+            else {
+                std::cerr << "Error: -sharp-tex must be followed by a value (0 = off).\n";
+                return 1;
+            }
+        }
+        else if (arg == "-sharp" || arg == "-post-sharp") {
+            if (i + 1 < argc) {
+                float v = std::stof(argv[++i]);
+                g_movie.sharp = (v > 0.f) ? v : 0.f;
+                if (g_movie.sharp > 1.0f) {
+                    std::cerr << "Warning: -sharp " << g_movie.sharp
+                        << " > 1.0, clamped to 1.0\n";
+                    g_movie.sharp = 1.0f;
+                }
+            }
+            else {
+                std::cerr << "Error: -sharp must be followed by a value (0 = off).\n";
+                return 1;
+            }
+        }
+        else if (arg == "-sharp-guard") {
+            if (i + 1 < argc) {
+                g_movie.sharp_halo_guard = std::stof(argv[++i]);
+                if (g_movie.sharp_halo_guard < 0.f) g_movie.sharp_halo_guard = 0.f;
+            }
+            else {
+                std::cerr << "Error: -sharp-guard must be followed by a value.\n";
+                return 1;
+            }
+        }
+        else if (arg == "-dehalo") {
+            if (i + 1 < argc) {
+                float v = std::stof(argv[++i]);
+                g_movie.dehalo = (v > 0.f) ? v : 0.f;
+                if (g_movie.dehalo > 1.0f) {
+                    std::cerr << "Warning: -dehalo " << g_movie.dehalo
+                        << " > 1.0, clamped to 1.0\n";
+                    g_movie.dehalo = 1.0f;
+                }
+            }
+            else {
+                std::cerr << "Error: -dehalo must be followed by a value (0 = off).\n";
+                return 1;
+            }
+            }
+        else if (arg == "-dehalo-dark") {
+            if (i + 1 < argc) {
+                    g_movie.dehalo_dark_bias = std::stof(argv[++i]);
+                    if (g_movie.dehalo_dark_bias < 0.f) g_movie.dehalo_dark_bias = 0.f;
+                    if (g_movie.dehalo_dark_bias > 1.f) g_movie.dehalo_dark_bias = 1.f;
+            }
+            else {
+                    std::cerr << "Error: -dehalo-dark must be followed by a value.\n";
+                    return 1;
+            }
+        }
+        else if (arg == "-fps") {
+            if (i + 1 < argc) {
+                g_movie.fps_override = std::stod(argv[++i]);
+                if (g_movie.fps_override > 0.0)
+                    std::cerr << "INFO: fps override = " << g_movie.fps_override << "\n";
+            }
+            else {
+                std::cerr << "Error: -fps must be followed by a number.\n";
+                return 1;
+            }
         }
         else {
             // детектор пути к файлу
@@ -163,17 +310,17 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Главное меню
+    // Main Menu
     if (in_filename.empty() || out_filename.empty()) {
         std::cout << "==================================================================\n";
-        std::cout << " HFNAR (High Frequency Noise Audio Reconstructor) CLI\n";
-        std::cout << " AVREngine 1.1000 Series - Preview Code 14\n";
+        std::cout << " HFNAR + VOMOD + MVMOD CLI\n";
+        std::cout << " AVREngine 1.1000 Series - Preview Code 21\n";
         std::cout << "==================================================================\n\n";
         std::cout << "Using: " << argv[0] << " <input_wav> <output_wav> [flags]\n\n";
         std::cout << "Options:\n";
-        std::cout << "  -v <10|16|20|21|30|32|34|40|41|42>        Version (Default: 32 - Highest version)\n";
+        std::cout << "  -v <10|16|20|21|30|32|33>        Version (Default: 32 - Highest version)\n";
         std::cout << "  -v 32                   - it's Beta and may cause troubles     \n";
-        std::cout << "  -v 42                   - it's Demo and may cause troubles     \n\n";
+        std::cout << "  -v 33                   - VideoMode (demo MADSR)     \n\n";
         std::cout << "  -cutoff <Hz>         Manual Cut-off frequency in Hz (if not specified, sets auto)\n";
         std::cout << "  -tes                 Enable Temporal Envelope Sharping\n\n";
         std::cout << "  -model <filename>    Set model to use (if not specified, uses default)\n";
@@ -190,6 +337,33 @@ int main(int argc, char* argv[]) {
         if (h == 0 || w == 0) { std::cout << "ERROR: Ident -w -h\n"; return 1; }
         //run_video_upscaler(model_filename_mv1x, in_filename, out_filename, w, h);
         return 0;
+    }
+    if (version == 33) {
+        std::cout << "Input video file: " << in_filename << "\n";
+        std::cout << "Start MOVIEMOD10 (video upscale x2, MADSR engine)\n";
+        std::cout << "  strength = " << g_movie.strength
+            << " | threads = " << (num_threads > 0 ? num_threads : g_movie.threads)
+            << " | stateful = " << (g_movie.stateful ? "yes" : "no") << "\n";
+
+        mvmod10::VideoOptions opts;
+        opts.threads = (num_threads > 0) ? num_threads : g_movie.threads;
+        opts.strength = g_movie.strength;
+        opts.stateful = g_movie.stateful;
+        opts.scene_cut_thresh = g_movie.scene_cut_thresh;
+        opts.verbose = g_movie.verbose;
+        opts.dehalo = (g_movie.dehalo > 0.f);
+        opts.dehalo_strength = g_movie.dehalo;
+        opts.dehalo_dark_bias = g_movie.dehalo_dark_bias;
+        opts.fps_override = g_movie.fps_override;
+
+        bool ok = mvmod10::process_video(
+            in_filename,
+            out_filename,
+            model_filename_mv1x,
+            w, h,                    // 0,0 = авто 2x
+            opts
+        );
+        return ok ? 0 : 1;
     }
 
     unsigned int channels;
